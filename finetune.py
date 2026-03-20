@@ -48,6 +48,10 @@ def parse_args():
                     help="Fraction of data to hold out for validation")
     p.add_argument("--output-dir", type=str, default="./finetune_output",
                     help="Directory to save LoRA adapter")
+    p.add_argument("--lora-target", type=str, default="all-linear",
+                    help="LoRA target modules: 'all-linear' or comma-separated names")
+    p.add_argument("--warmup-ratio", type=float, default=0.05,
+                    help="Fraction of time budget for LR warmup")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     return p.parse_args()
 
@@ -58,7 +62,7 @@ def parse_args():
 def load_texts(data_dir):
     """Read all .txt files from data_dir, split into documents on double-newlines."""
     data_path = Path(data_dir)
-    txt_files = sorted(data_path.glob("*.txt"))
+    txt_files = sorted(data_path.rglob("*.txt"))
     if not txt_files:
         raise FileNotFoundError(f"No .txt files found in {data_dir}")
     print(f"Data: found {len(txt_files)} .txt files in {data_dir}")
@@ -139,7 +143,7 @@ def prepare_datasets(documents, tokenizer, max_seq_len, val_ratio, seed):
 # Model loading
 # ---------------------------------------------------------------------------
 
-def load_model_and_tokenizer(model_name, lora_rank, lora_alpha):
+def load_model_and_tokenizer(model_name, lora_rank, lora_alpha, lora_target):
     """Load quantized model with LoRA adapters."""
     print(f"Model: loading {model_name} with 4-bit quantization...")
     t0 = time.time()
@@ -164,11 +168,16 @@ def load_model_and_tokenizer(model_name, lora_rank, lora_alpha):
     )
     model = prepare_model_for_kbit_training(model)
 
+    # Parse target modules: "all-linear" or comma-separated list
+    if lora_target == "all-linear":
+        target_modules = "all-linear"
+    else:
+        target_modules = [m.strip() for m in lora_target.split(",")]
+
     lora_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                         "gate_proj", "up_proj", "down_proj"],
+        target_modules=target_modules,
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
@@ -268,7 +277,7 @@ def main():
 
     # Load model and tokenizer
     model, tokenizer, trainable_params = load_model_and_tokenizer(
-        args.model_name, args.lora_rank, args.lora_alpha
+        args.model_name, args.lora_rank, args.lora_alpha, args.lora_target
     )
 
     # Load and prepare data
@@ -294,7 +303,7 @@ def main():
 
     # Optimizer
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        [p for p in model.parameters() if p.requires_grad],
         lr=args.lr,
         weight_decay=0.01,
         betas=(0.9, 0.999),
@@ -350,10 +359,12 @@ def main():
             micro_step += 1
 
         # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(
+            [p for p in model.parameters() if p.requires_grad], 1.0
+        )
 
         # Update LR
-        lr = get_lr(step, estimated_total_steps, args.lr)
+        lr = get_lr(step, estimated_total_steps, args.lr, args.warmup_ratio)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
 

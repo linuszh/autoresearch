@@ -108,3 +108,26 @@ LOOP FOREVER:
 **Crashes**: Fix trivial bugs and re-run. If the idea is fundamentally broken, log "crash" and move on.
 
 **NEVER STOP**: Once the loop begins, do NOT pause to ask the human. Continue autonomously until manually interrupted.
+
+## Using the finetuned model
+
+After training, the LoRA adapter is saved to `--output-dir`. Load it for inference:
+
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+base_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3.5-9B", torch_dtype=torch.bfloat16, device_map="auto")
+model = PeftModel.from_pretrained(base_model, "./finetune_output")
+tokenizer = AutoTokenizer.from_pretrained("./finetune_output")
+
+inputs = tokenizer("The most common feline disease", return_tensors="pt").to("cuda")
+outputs = model.generate(**inputs, max_new_tokens=200)
+print(tokenizer.decode(outputs[0]))
+```
+
+## Notes
+
+- **Qwen 3.5 thinking mode**: The base model defaults to "thinking mode". For plain text domain-adaptation finetuning, this is not used — we train standard causal LM on raw text.
+- **Overfitting**: With small datasets, watch the epoch count. If it exceeds ~5, reduce the time budget or add more data.
+- **VRAM**: Qwen3.5-9B with QLoRA needs ~8-12GB. Reduce `--batch-size` or `--max-seq-len` if OOM. Or use `Qwen/Qwen3.5-4B`.
